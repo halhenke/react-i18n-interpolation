@@ -1,12 +1,19 @@
-import React from 'react';
-import describe from 'tape-bdd';
+import test from 'tape';
 import sinon from 'sinon';
+import React from 'react';
+import {check, gen} from 'tape-check';
+
+import {times} from './helpers';
+import {
+  anyPrimitive, anyNonEmptyString, anyEmptyObjectOrArray, anySymbolOrFunctionRef,
+  anyEnumerableWithSingleEmptyKey, anyEnumerableWithMultipleKeys,
+  genIndices
+} from './generators';
+import {
+  genTokensWithDuplicateNames
+} from './token-spec';
+
 import {gettextFactory} from '../src/index';
-import {parametric} from './helpers';
-
-const SIMPLE_TYPES = [undefined, '', 'bar', false, true, 12, NaN];
-
-const COMPLEX_TYPES = [null, {}, Symbol('bar'), () => {}];
 
 
 const createSpy = () => {
@@ -19,174 +26,274 @@ const createSpy = () => {
   return {spy, gettext: {gettext}};
 };
 
+const anyUnkeyedComplexSubstitution = gen.oneOf([
+  anySymbolOrFunctionRef,
+  anyEmptyObjectOrArray,
+  anyEnumerableWithSingleEmptyKey,
+  anyEnumerableWithMultipleKeys
+]);
 
-describe('gettext', (it, describe) => {
+const anyKeyedPrimitiveSubstitutionKV = gen.object({
+  k: anyNonEmptyString,
+  v: anyPrimitive
+});
 
-  it('should behave transparently (by default)', parametric(() => {
-    const template = gettextFactory();
-    return [
-      [template`foo`, 'foo']
-    ];
-  }));
+const anyKeyedComplexSubstitutionKV = gen.object({
+  k: anyNonEmptyString,
+  v: gen.oneOf([anySymbolOrFunctionRef, anyEmptyObjectOrArray])
+});
 
-  it('should throw on bad gettext instance', (assert) => {
-    const template = gettextFactory({gettext: {}});
+const anyObjectLikeSubstitution = anyKeyedComplexSubstitutionKV
+  .then(({k, v}) => ({[k]: v}));
 
-    assert.throws(() => template`foo`, /missing gettext/);
-  });
+const anyStringLikeSubstitution = gen.oneOf([
+  anyPrimitive,
+  anyUnkeyedComplexSubstitution,
+  anyKeyedPrimitiveSubstitutionKV.then(({k, v}) => ({[k]: v}))
+]);
 
-  describe('with plain substitution', (it) => {
 
-    it('should return string for simple-typed substitutions', parametric(() => {
-      const template = gettextFactory();
-
-      return SIMPLE_TYPES
-        .map(v => [template`foo ${v}`, `foo ${v}`]);
-    }));
-
-    it('should return Array for complex-typed substitutions', parametric(() => {
-      const template = gettextFactory();
-
-      return COMPLEX_TYPES
-        .map(v => [template`foo ${v}`, ['foo ', v]]);
-    }));
-
-    it('should collapse adjacent string elements', parametric(() => {
-      const template = gettextFactory();
-
-      return [
-        [template`1${'2'}3${null}4`, ['123', null, '4']]
-      ];
-    }));
-
-    it('should retain whitespace substitutions (unlike normal literals)', parametric(() => {
-      const template = gettextFactory();
-
-      return [
-        [template`${' '}${2}${' '}`, ' 2 ']
-      ];
-    }));
-
-    it('should substitute before translation', parametric(() => {
-      const {spy, gettext} = createSpy();
-      const template = gettextFactory({gettext});
-
-      // spy is called as a side-effect
-      [...SIMPLE_TYPES, ...COMPLEX_TYPES]
-        .forEach(v => template`foo ${v}`);
-
-      return [...SIMPLE_TYPES, ...COMPLEX_TYPES]
-        .map((v, i) => [spy.getCall(i).args[0], `foo ${String(v)}`]);
-    }));
-  });
-
-  describe('with key-value substitution', (it) => {
-
-    it('should use the hash value', parametric(() => {
-      const template = gettextFactory();
-
-      return [
-        ...SIMPLE_TYPES.map(v => [template`foo ${{a: v}}`, `foo ${v}`]),
-        ...COMPLEX_TYPES.map(v => [template`foo ${{a: v}}`, ['foo ', v]])
-      ];
-    }));
-
-    it('should use the hash key in the translation', parametric(() => {
-      const {spy, gettext} = createSpy();
-      const template = gettextFactory({gettext});
-
-      // spy is called as a side-effect
-      [...SIMPLE_TYPES, ...COMPLEX_TYPES]
-        .forEach(v => template`foo ${{a: v}}`);
-
-      return [...SIMPLE_TYPES, ...COMPLEX_TYPES]
-        .map((v, i) => [spy.getCall(i).args[0], 'foo __a__']);
-    }));
-
-    it('should not generate empty string elements', parametric(() => {
-      const template = gettextFactory();
-
-      return [
-        ...COMPLEX_TYPES.map(v => [template`${{a: v}}${{a: v}}${{a: v}}`, [v, v, v]]),
-        ...COMPLEX_TYPES.map(v => [template`a${{a: v}}${{a: v}}${{a: v}}`, ['a', v, v, v]]),
-        ...COMPLEX_TYPES.map(v => [template`${{a: v}}b${{a: v}}${{a: v}}`, [v, 'b', v, v]]),
-        ...COMPLEX_TYPES.map(v => [template`${{a: v}}${{a: v}}c${{a: v}}`, [v, v, 'c', v]]),
-        ...COMPLEX_TYPES.map(v => [template`${{a: v}}${{a: v}}${{a: v}}d`, [v, v, v, 'd']])
-      ];
-    }));
-
-    it('should collapse adjacent string elements', parametric(() => {
-      const template = gettextFactory();
-
-      return [
-        [template`1${{a: '2'}}3${{b: null}}4`, ['123', null, '4']]
-      ];
-    }));
-
-    it('should retain whitespace substitutions', parametric(() => {
-      const template = gettextFactory();
-
-      return [
-        [template`${{a: ' '}}${{b: 2}}${{c: ' '}}`, ' 2 ']
-      ];
-    }));
-
-    it('should throw where duplicate keys mismatch value', (assert) => {
-      const template = gettextFactory();
-
-      assert.throws(() => template`${{a: 'foo'}}${{a: 'bar'}}`);
+const genMixOfStringAndObjectSubstitutions = ({size}) =>
+  gen.object({
+    objIndices: genIndices({minSize: 0, maxSize: size}),
+    objLikeSubstitutions: gen.array(anyObjectLikeSubstitution, {size}),
+    strLikeSubstitutions: gen.array(anyStringLikeSubstitution, {size})
+  })
+    .then(({objIndices, objLikeSubstitutions, strLikeSubstitutions}) => {
+      const objectPool = objLikeSubstitutions.slice();
+      const stringPool = strLikeSubstitutions.slice();
+      const values = (new Array(size)).fill()
+        .map((_, i) => (objIndices.includes(i) ? objectPool.pop() : stringPool.pop()));
+      return {objIndices, values};
     });
 
-    it('should permit duplicate keys with matching value', (assert) => {
-      const template = gettextFactory();
 
-      assert.doesNotThrow(() => template`${{a: 'foo'}}${{a: 'foo'}}`);
-    });
+test('gettext: created with bad gettext instance', (t) => {
+  const template = gettextFactory({NODE_ENV: 'development', gettext: {}});
 
-    it('should permit duplicate keys in production', (assert) => {
-      const template = gettextFactory({NODE_ENV: 'production'});
+  t.throws(
+    () => template`foo`,
+    /missing gettext/,
+    'should throw an Error'
+  );
+  t.end();
+});
 
-      assert.doesNotThrow(() => template`${{a: 'foo'}}${{a: 'bar'}}`);
-    });
-  });
 
-  describe('with react component substitution', (it) => {
+test('gettext: degenerate case without substitutions', (t) => {
+  const {spy, gettext} = createSpy();
+  const template = gettextFactory({gettext});
 
-    it('should use the hash value', (assert) => {
-      const template = gettextFactory();
-      const element = React.createElement('span', {foo: 'bar'});
-      const result = template`foo ${{a: element}}`;
+  t.equal(
+    template`foo`,
+    'foo',
+    'should behave transparently'
+  );
+  t.equal(
+    spy.firstCall.args[0],
+    'foo',
+    'should go through translation'
+  );
+  t.end();
+});
 
-      assert.ok(React.isValidElement(result[1]));
-    });
 
-    it('should clone the hash value', (assert) => {
-      const template = gettextFactory();
-      const element = React.createElement('span', {foo: 'bar'});
-      const result = template`foo ${{a: element}}`;
+test('gettext: direct primitive substitutions', check(
+  times(20),
+  anyPrimitive,
+  (t, v) => {
+    const {spy, gettext} = createSpy();
+    const template = gettextFactory({gettext});
 
-      assert.notEqual(result[1], element);
-    });
+    t.equal(
+      template`foo ${v}`,
+      `foo ${String(v)}`, /* Symbol needs explicit string conversion */
+      'should return string'
+    );
+    t.equal(
+      spy.firstCall.args[0],
+      `foo ${String(v)}`,
+      'should substitute before translation'
+    );
+    t.end();
+  }
+));
 
-    it('should assign element key where empty', (assert) => {
-      const template = gettextFactory();
-      const element = React.createElement('span', {foo: 'bar'});
 
-      assert.deepLooseEqual([
-        template`foo ${{a: element}}`,
-        template`${{b: element}} bar`
-      ], [
-        ['foo ', {...element, key: 'a-1'}],
-        [{...element, key: 'b-0'}, ' bar']
-      ]);
-    });
+test('gettext: direct complex substitution', check(
+  times(20),
+  anyUnkeyedComplexSubstitution,
+  (t, v) => {
+    const {spy, gettext} = createSpy();
+    const devTemplate = gettextFactory({gettext, NODE_ENV: 'development'});
 
-    it('should not overwrite element key', (assert) => {
-      const template = gettextFactory();
-      const element = React.createElement('span', {key: 'baz', foo: 'bar'});
-      const result = template`foo ${{a: element}}`;
+    t.throws(
+      () => devTemplate`foo ${v}`,
+      /Error in gettext/,
+      'should throw exception in development env'
+    );
+    t.notOk(
+      spy.called,
+      'should throw before translation'
+    );
 
-      assert.looseEqual(result[1], {...element, key: 'baz'});
-    });
-  });
+    const prodTemplate = gettextFactory({gettext, NODE_ENV: 'production'});
+
+    t.doesNotThrow(
+      () => prodTemplate`foo ${v}`,
+      'should not throw exception in production env'
+    );
+    t.equal(
+      prodTemplate`foo ${v}`,
+      `foo ${String(v)}`, /* Symbol needs explicit string conversion */
+      'in production should return string'
+    );
+    t.equal(
+      spy.firstCall.args[0],
+      `foo ${String(v)}`,
+      'should substitute before translation'
+    );
+
+    t.end();
+  }
+));
+
+
+test('gettext: keyed primitive substitution', check(
+  times(20),
+  anyKeyedPrimitiveSubstitutionKV,
+  (t, {k, v}) => {
+    const {spy, gettext} = createSpy();
+    const template = gettextFactory({gettext});
+
+    t.equal(
+      template`foo ${{[k]: v}}`,
+      `foo ${String(v)}`, /* Symbol needs explicit string conversion */
+      'should return string'
+    );
+    t.equal(
+      spy.firstCall.args[0],
+      `foo __${k}__`, /* this is white-box but we need to check translation somehow */
+      'should use token name in the translation'
+    );
+    t.end();
+  }
+));
+
+
+test('gettext: keyed complex substitution', check(
+  times(20),
+  anyKeyedComplexSubstitutionKV,
+  (t, {k, v}) => {
+    const {spy, gettext} = createSpy();
+    const template = gettextFactory({gettext});
+
+    t.deepEqual(
+      template`foo ${{[k]: v}}`,
+      ['foo ', v],
+      'should return Array'
+    );
+    t.equal(
+      spy.firstCall.args[0],
+      `foo __${k}__`, /* this is white-box but we need to check translation somehow */
+      'should use token name in the translation'
+    );
+    t.end();
+  }
+));
+
+
+test('gettext: mix of keyed and non-keyed substitutions', check(
+  times(20),
+  genMixOfStringAndObjectSubstitutions({size: 3}),
+  (t, {objIndices, values: [v1, v2, v3]}) => {
+    const template = gettextFactory({NODE_ENV: 'production'});
+    const result = template`1${v1}2${v2}${v3}3`;
+
+    t.ok(
+      objIndices.length ? Array.isArray(result) : (typeof result === 'string'),
+      'should return string where there is full string collapse or Array otherwise'
+    );
+    t.equal(
+      [].concat(result).length,
+      1 + objIndices.length * 2 - Number(objIndices.includes(1) && (objIndices.includes(2))),
+      'should collapse all primitive substitutions into fewer strings'
+    );
+    t.end();
+  }
+));
+
+
+test('gettext: keyed substitution with duplicate names', check(
+  times(20),
+  genTokensWithDuplicateNames, /* all tokens throw, but for some it is because they are unkeyed */
+  (t, {tokens}) => {
+    const {spy, gettext} = createSpy();
+    const devTemplate = gettextFactory({gettext, NODE_ENV: 'development'});
+
+    t.throws(
+      () => devTemplate((new Array(tokens.length + 1)).fill(''), ...tokens),
+      /Error in gettext/,
+      'should throw exception in development env'
+    );
+    t.notOk(
+      spy.called,
+      'should throw before translation'
+    );
+
+    const prodTemplate = gettextFactory({gettext, NODE_ENV: 'production'});
+
+    t.doesNotThrow(
+      () => prodTemplate((new Array(tokens.length + 1)).fill(''), ...tokens),
+      'should not throw exception in development env'
+    );
+    t.end();
+  }
+));
+
+
+test('gettext: keyed React element substitution', (t) => {
+  const template = gettextFactory();
+
+  const unkeyedElement = React.createElement('span', {foo: 'bar'});
+  const unkeyedResult = template`foo ${{a: unkeyedElement}}`;
+
+  t.ok(
+    React.isValidElement(unkeyedResult[1]),
+    'should maintain valid react elements'
+  );
+
+  t.notEqual(
+    unkeyedResult[1],
+    unkeyedElement,
+    'should clone the element where key is missing'
+  );
+
+  t.deepLooseEqual(
+    [
+      template`foo ${{a: unkeyedElement}}`,
+      template`${{b: unkeyedElement}} bar`
+    ], [
+      ['foo ', {...unkeyedElement, key: 'a-1'}],
+      [{...unkeyedElement, key: 'b-0'}, ' bar']
+    ],
+    'should generate an element key where key is missing'
+  );
+
+  const keyedElement = React.createElement('span', {foo: 'bar', key: 'baz'});
+  const keyedResult = template`foo ${{a: keyedElement}}`;
+
+  t.equal(
+    keyedResult[1],
+    keyedElement,
+    'should not clone the element where key is present'
+  );
+
+  t.looseEqual(
+    keyedResult[1],
+    {...keyedElement, key: 'baz'},
+    'should not overwrite element key where key is present'
+  );
+
+  t.end();
 });

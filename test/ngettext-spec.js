@@ -1,5 +1,4 @@
 import React from 'react';
-import describe from 'tape-bdd';
 import sinon from 'sinon';
 import {defaultNgettext} from '../src/plurals';
 import {ngettextFactory} from '../src/index';
